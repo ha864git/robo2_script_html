@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>motion script uploader for robot2</title>
+</head>
+
+<style>
+    .container_flex {
+        display: flex;
+    }
+
+    .display_none {
+        display: none;
+    }
+
+    #text_area {
+        width: 300px;
+        height: 200px;
+        margin-top: 5px;
+        padding: 5px;
+        font-size: 14px;
+        font-family: sans-serif;
+    }
+
+    .base {
+        display: flex;
+        flex-direction: row;
+        width: 100vw;
+        height: 100vh;
+    }
+
+    .base.display_none {
+        display: none;
+    }
+
+    .class1 {
+        width: 200px;
+    }
+
+    .class2 {
+        width: 200px;
+    }
+</style>
+
+<body>
+    <label>robo2 script uploader </label><button type="button" id="connect">接続</button>
+    <button type="button" id="list" class="display_none">list</button><br>
+    <textarea id="text_area" class="display_none"></textarea>
+
+    <div id="file_container" class="container_flex display_none">
+        <form><input id="file" type="file" name="file" aria-label="file" /></form>
+        <button type="button" id="upload" class="display_none">Upload</button>
+    </div>
+
+
+    <div id="clist" class="base display_none">
+        <div class="class1">
+            <table id="editlist"></table>
+        </div>
+        <div class="class2">
+            <table id="slist"></table>
+        </div>
+    </div>
+
+    <script>
+        // Used the following as a reference for the BLE UART TX/RX part. 
+        // https://qiita.com/nakazawaken1/items/4a15480899722a33e8ee  uart3.html
+
+        const UUID_UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+        const UUID_TX_CHAR_CHARACTERISTIC = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+        const UUID_RX_CHAR_CHARACTERISTIC = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+        let gatt = null;
+        let tx = null;
+        let rx = null;
+
+        const update = connected => {
+            if (connected) {
+                document.getElementById('connect').textContent = '切断'
+                document.getElementById('text_area').value = '';
+                document.getElementById('text_area').classList.remove('display_none');
+                document.getElementById('clist').classList.remove('display_none');
+                document.getElementById('list').classList.remove('display_none');
+                document.getElementById('file_container').classList.remove('display_none');
+                document.getElementById('text_area').focus();
+            } else {
+                document.getElementById('connect').textContent = '接続';
+                document.getElementById('text_area').classList.add('display_none');
+                document.getElementById('clist').classList.add('display_none');
+                document.getElementById('list').classList.add('display_none');
+                document.getElementById('file_container').classList.add('display_none');
+            };
+        }
+
+        const send = text => rx.writeValue(new TextEncoder().encode(text + '\n'));
+
+        document.getElementById('connect').addEventListener('click', e => {
+            if (!(navigator.bluetooth && navigator.bluetooth.requestDevice)) {
+                alert('This browser does not support WebBluetooth.');
+                return;
+            }
+            if (document.getElementById('connect').textContent == '接続') {
+                navigator.bluetooth.requestDevice({
+                    filters: [
+                        { services: [UUID_UART_SERVICE] },
+                        { namePrefix: 'BBC micro:bit' }
+                    ]
+                }).then(device => {
+                    gatt = device.gatt;
+                    return gatt.connect();
+                }).then(server =>
+                    server.getPrimaryService(UUID_UART_SERVICE)
+                ).then(service =>
+                    Promise.all([
+                        service.getCharacteristic(UUID_TX_CHAR_CHARACTERISTIC),
+                        service.getCharacteristic(UUID_RX_CHAR_CHARACTERISTIC)])
+                ).then(characteristics => {
+                    tx = characteristics[0];
+                    tx.startNotifications();
+                    tx.addEventListener('characteristicvaluechanged', e => {
+                        const text_area = document.getElementById('text_area');
+                        const text = new TextDecoder().decode(e.target.value);
+                        text_area.value = text_area.value + '(rx) ' + text;
+                        text_area.scrollTo(0, text_area.scrollHeight);  // Show the latest line
+                        text_area.focus();                              // Set focus
+                        make_list(text);
+                    })
+                    rx = characteristics[1];
+                    update(true);
+                }).catch(function (err) {
+                    alert(err);
+                })
+            } else {
+                gatt.disconnect();
+                update(false);
+            }
+        })
+
+        document.getElementById('text_area').addEventListener('keypress', e => {
+            if (e.keyCode === 13) {     // enter key
+                const text_area = document.getElementById('text_area');
+                const lines = text_area.value.split('\n');
+                const line = lines[lines.length - 1];
+                send(line);
+            }
+        })
+
+        let messages = [];
+        let Upload_pointer = 0;
+        let Download_counter = 0;
+        let Download_str = "";
+
+        // file click event
+        document.getElementById('file').addEventListener('click', function () {
+            // Clears the file path to raises a change event.
+            document.getElementById("file").value = '';
+            // Hide upload button
+            document.getElementById('upload').classList.add('display_none');
+        });
+
+        // file change event
+        document.getElementById('file').addEventListener('change', function () {
+            let reader = new FileReader();
+            let fileList = file.files;
+            reader.readAsText(fileList[0], 'UTF-8');
+            reader.onload = function () {
+                messages = reader.result.split(/\r\n/);
+            };
+            // Show upload button
+            document.getElementById('upload').classList.remove('display_none');
+        });
+
+        // upload button
+        document.getElementById('upload').addEventListener('click', function () {
+            startUpload();
+        });
+
+        document.getElementById('list').addEventListener('click', function () {
+            print_log('list');
+            send('list');
+        });
+
+
+        function clear_list() {
+            document.getElementById('editlist').innerHTML = ''; // table clear
+            document.getElementById('slist').innerHTML = '';
+            cmds_str = [];
+            cmds_list = [];
+        }
+
+        function make_list(str) {
+
+            str = str.replace('\r\n', '');
+            if (str == 'c-ok') {
+                clear_list();
+            } else if (str == 'lstart') {
+                clear_list();
+                cmd_str = '';
+                cmd_list = [];
+                list_mode = 'on';
+            } else if (str == 'lend') {
+                list_mode = 'off';
+                if (cmd_list.length > 0) {
+                    addlist(cmd_str, cmd_list);
+                }
+            } else if (list_mode == 'on') {
+                let tmp = str.split(':');
+                if (tmp[0] == 'c') {
+                    if (cmd_list.length > 0) {
+                        addlist(cmd_str, cmd_list);
+                    }
+                    cmd_str = tmp[1];
+                    cmd_list = [];
+                } else {
+                    cmd_list.push(str);
+                }
+            }
+        }
+
+        let UploadIntervalID;
+        let NextUploadPointer;
+
+        function startUpload() {
+            if (!UploadIntervalID) {
+                Download_str = "";
+                Download_counter = 0;
+                NextUploadPointer = 0;
+
+                const text_data = "clear";
+                send(text_data);
+                print_log('>>>--- upload start ---<<<');
+                print_log(text_data);
+
+                UploadIntervalID = setInterval(Upload, 100);
+
+            }
+        }
+
+        function Upload() {
+
+            if (NextUploadPointer < messages.length) {
+                let text_data = messages[NextUploadPointer];
+                let temp1 = text_data.split(':');
+                let temp2 = text_data.split(',');
+                if (temp1[0] == 'c') {
+                    ;
+                } else if (temp2[0] == 'f' || temp2[0] == 'l') {
+                    text_data = "s:" + text_data;
+                } else {
+                    text_data = '';
+                }
+                if (text_data != '') {
+                    send(text_data);
+                    print_log(text_data);
+                }
+                ++NextUploadPointer;
+            } else {
+                NextUploadPointer = 0;
+                stopUpload();
+                print_log('>>>--- upload end ---<<<');
+                send('list');
+                print_log('list');
+            }
+
+        }
+
+        function stopUpload() {
+            clearInterval(UploadIntervalID);
+            UploadIntervalID = null;
+        }
+
+        let cmd_str = '';
+        let cmd_list = [];
+        let list_mode = 'off';
+        let cmds_str = [];
+        let cmds_list = [];
+
+        const editlist_col_cmd_str = 1;
+
+        function playRow(obj) {
+            event.preventDefault();
+            const tr = obj.parentNode.parentNode;
+            const cmd_str = tr.cells[editlist_col_cmd_str].innerText;
+            print_log(cmd_str);
+            send(cmd_str);
+        }
+
+        function playstop() {
+            event.preventDefault();
+            print_log('stop');
+            send('stop');
+        }
+
+        function addlist(cmd_str, cmd_list) {
+            const table = document.getElementById('editlist');
+            const row = table.insertRow(-1);
+            const cell1 = row.insertCell(-1);
+            const cell2 = row.insertCell(-1);
+            cell1.innerHTML = '<input type="button" value="▶" onmousedown="playRow(this)" ontouchstart="playRow(this)" onmouseup="playstop()" ontouchend="playstop()" />';
+            cell2.innerHTML = '<div onclick="listRow(this)">' + cmd_str + '</div>';
+
+            let tmp = cmd_list[0];
+            for (let i = 1; i < cmd_list.length; i++) {
+                tmp = tmp + '<br>' + cmd_list[i];
+            }
+            cmds_str.push(cmd_str);
+            cmds_list.push(cmd_list);
+
+        }
+
+        function listRow(obj) {
+            const tr = obj.parentNode.parentNode;
+            ht = '-- ' + obj.firstChild.data + ' --';
+            document.getElementById('slist').innerHTML = ht;
+            for (let i = 0; i < cmds_list[tr.sectionRowIndex].length; i++) {
+                if (ht != '') {
+                    ht += '<br>';
+                }
+                ht += cmds_list[tr.sectionRowIndex][i];
+            }
+            document.getElementById('slist').innerHTML = ht;
+        }
+
+        function print_log(str) {
+            const list = document.getElementById('text_area');
+            list.value = list.value + str + '\n';
+            list.scrollTo(0, list.scrollHeight); // Show the latest line
+        }
+
+    </script>
+</body>
+
+</html>
